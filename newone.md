@@ -103,6 +103,10 @@ Simple Tag属于MPE（Multi-Agent Particle Environments），用于研究多智�
 | State Shape | (62,) |
 | State Values | (-inf,inf) |
 
+### multilayer structure
+
+![fig_01: multilayer structure](multilayer01-1.jpg)
+
 1. **智能体**：
 - 追逐者（Predator）：多个追逐者智能体，他们的目标是合作追捕逃避者。每个追逐者都可以移动并尝试捕捉逃避者。
 - 逃避者（Prey）：一个逃避者智能体，他的目标是躲避追逐者的追捕。逃避者可以移动以尽可能避免被捕捉。

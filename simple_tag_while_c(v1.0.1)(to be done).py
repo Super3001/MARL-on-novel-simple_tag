@@ -1,6 +1,4 @@
 
-# v1.0.2
-
 '''
 simple tag -> tag while c
 
@@ -30,14 +28,24 @@ note:
 收集到资源点的reward: collector: 1, controller: 0.5
 
 edit:
+2023.8.14(legion):
+1. 修复了agent变为other的bug
+--- new environment version ---
+old: simple_tag_while_c(v1.0.0) before 8.15 (未保存)
+new: simple_tag_while_c(v1.0.1) after 8.15
 
-older version: v1.0.0 v1.0.1
-older edition in older files
+2023.8.15(legion):
+1. 修复了PQ不补0的bug
+2. 改回了agent的顺序：adversary, controller, collector 不影响结果
+3. 增加了收集资源点对controller的reward
+4. 更新了一次可以收集多个资源点
+5. 四种shaping
+6. PQ应该reverse, 按照dist由小到大排列
+7. 修复了collector的对于资源点没有观测相对位置的bug
+8. 修改了PQ的配置
 --- new environment version ---
 old: simple_tag_while_c(v1.0.1) before 8.16 (未保存,可还原)
 new: simple_tag_while_c(v1.0.2) after 8.16
-
-注意：此版本(v1.0.2)中训练时的collection reward疑似不生效
 
 '''
 
@@ -50,7 +58,7 @@ from pettingzoo.mpe._mpe_utils.scenario import BaseScenario
 from pettingzoo.mpe._mpe_utils.simple_env import SimpleEnv, make_env
 from pettingzoo.utils.conversions import parallel_wrapper_fn
 # from my_envs.utils import PQ
-from pettingzoo.mpe.simple_tag.myutils import PQ
+from pettingzoo.mpe._mpe_utils.myutils import PQ
 from typing import Optional, Union, List, Any, Dict, Tuple
 
 '''环境参量'''
@@ -86,8 +94,7 @@ COMMUTE_SHAPING_COLLECTOR = True
 '''应该改为可选参数'''
 N_DETECT = 3 # number of resources detected by collector
 STRICT_MODE = False # 严格模式，丢失通信后，collector消失
-# DRAW_DEAD_POINT = False # 绘制已经被收集的J，为红色
-DRAW_DEAD_POINT = True
+DRAW_DEAD_POINT = False # 绘制已经被收集的J，为红色
 
 class raw_env(SimpleEnv, EzPickle):
     def __init__(
@@ -188,7 +195,6 @@ class Scenario_new(BaseScenario):
                 agent.son_index = son_index
                 agent.detect_threshold = DETECT_THRESH # 探测半径
                 agent.lost = False
-                agent.num_collection = 0
             agent.name = f"{base_name}_{base_index}"
             agent.collide = True
             agent.silent = True
@@ -289,8 +295,6 @@ class Scenario_new(BaseScenario):
         # 评判一个agent的好坏？在某一时刻的好坏？
         elif agent.kind == 2:
             return agent.num_collection
-        else: # controller
-            return 0 # to be done
         
     def is_collision(self, agent1, agent2):
         delta_pos = agent1.state.p_pos - agent2.state.p_pos
@@ -355,8 +359,8 @@ class Scenario_new(BaseScenario):
         # reward can optionally be shaped (decreased reward for increased out_of_range_distance from collectors)
             '''for adv in collectors'''
             for clt in collectors: # adv stands for each collector here
-                dist = float(np.sqrt(np.sum(np.square(agent.state.p_pos - clt.state.p_pos))))
-                rew -= 0.1 * max(0, dist - agent.comm_threshold)
+                dist = np.sqrt(np.sum(np.square(agent.state.p_pos - clt.state.p_pos)))
+                rew -= 0.1 * np.max(0, dist-agent.comm_threshold)
             
         # agents are penalized 丢失子收集器的通信
         ''' 非strict_mode: controller的发送半径为inf,
@@ -371,11 +375,8 @@ class Scenario_new(BaseScenario):
 
         # 子收集器收集到资源点的reward
         for clt in collectors:
-            rew += 5 * clt.num_collection # 应该在更新controller之前先更新collector
-            # OK
-            if clt.num_collection>0: print('collection reward to father controller: ', 5*clt.num_collection) # to inform or debug
-            # 更新collector的reward之后再重置
-            # clt.num_collection = 0
+            rew += 2 * clt.num_collection # 应该在更新controller之前先更新collector
+            # if clt.num_collection>0: print('collector reward: ', 0.5*clt.num_collection) # to inform
         # end for
 
         return rew
@@ -419,17 +420,15 @@ class Scenario_new(BaseScenario):
             
         if agent.lost:
             if world.strict_mode:
-                rew -= 10
+                rew -= 5
             else:
-                rew -= 1
+                rew -= 0.5
 
         '''collecton reward'''
-        rew += 5 * agent.num_collection # num_collection is 0 or 1
-        if agent.num_collection > 0: # to debug
-            print('collector reward for collection:', 5*agent.num_collection) # OK
-            # 更新完reward之后再重置num_collection
-            agent.num_collection = 0
-
+        rew += 2 * agent.num_collection # num_collection is 0 or 1
+        # if rew > 0: # to debug
+            # print('collector reward for collection:', rew) # OK
+        
         return rew
         
     def generate_landmark(self, collector, world)->Landmark: # generate J
@@ -557,24 +556,24 @@ class Scenario_new(BaseScenario):
                     other_vel.append(sibling.state.p_vel)
         
         # get positions of {N_detect} resources in this agent's detect range
-        priority_queue = PQ(world.N_detect, True) # reverse=True, 按照dist由小到大排列
+        priority_queue = PQ(world.N_detect, False) # reverse=False, 按照dist由大到小排列
+        '''这是旧版的失误'''
         
         '''重要: 判断收集资源点'''
         collected = []
-        # agent.num_collection = 0 # reward更新时再重置
-        '''edited'''
+        agent.num_collection = 0
         for i, resource in enumerate(world.landmarks):
             if in_detect(resource, agent):
                 '''基本上不会一次收集两个资源点'''
                 '''两个collector不能同时收集一个资源点，判断有先后'''
                 if dist(resource, agent) < agent.size:
-                    agent.num_collection = agent.num_collection + 1
+                    agent.num_collection += 1
                     collected.append(resource)
-                    print('collection success:')
+                    print('collection success')
 
                 else:
-                    priority_queue.push(resource.state.p_pos - agent.state.p_pos, dist(resource, agent))
-        if agent.num_collection>0: print('num_collection:', agent.num_collection)
+                    priority_queue.push(resource.state.p_pos, dist(resource, agent))
+                    '''没有用相对位置。这是旧版的失误'''
         # end for
 
         '''OK'''
@@ -594,7 +593,7 @@ class Scenario_new(BaseScenario):
                 for i in range(len(collected)):
                     new_landmark = self.generate_landmark(agent, world)
                     world.landmarks.append(new_landmark)
-                    priority_queue.push(new_landmark.state.p_pos - agent.state.p_pos, dist(new_landmark, agent))
+                    priority_queue.push(agent.state.p_pos, dist(new_landmark, agent))
                 # end for
                 # print(len(world.landmarks))
             
